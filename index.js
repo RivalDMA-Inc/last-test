@@ -14,6 +14,11 @@ fastify.register(cors, {
   allowedHeaders: ["Content-Type"]
 });
 
+// ✅ Fix: Add a default route for health check
+fastify.get('/', async (req, reply) => {
+  return { message: "Fastify server is running!" };
+});
+
 // C++ client long polling for data
 fastify.get('/getData', async (req, reply) => {
   const localIP = req.query.localip;
