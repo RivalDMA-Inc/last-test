@@ -105,7 +105,7 @@ fastify.get('/getFrontendData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       frontendConnections = frontendConnections.filter(r => r !== resolve);
-    }, 10000);
+    }, 500);
   });
 });
 
