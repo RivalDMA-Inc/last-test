@@ -1,7 +1,7 @@
 const fastify = require('fastify')({
   logger: { level: "error" },
   trustProxy: true,
-  bodyLimit: 1048576 // 1 MB in bytes
+  bodyLimit: 2048576 // 1 MB in bytes
 });
 const cors = require('@fastify/cors');
 const path = require('path');
@@ -11,7 +11,7 @@ const cluster = require('cluster');
 const os = require('os');
 
 const PORT = process.env.PORT || 3000;
-const DATA_TTL = 17000; // Data expiration time (30 seconds)
+const DATA_TTL = 30000; // Data expiration time (30 seconds)
 
 let pendingData = {};  // { localIP: { data, timestamp } }
 let pendingConnections = {}; // { localIP: [resolve1, resolve2, ...] }
@@ -66,7 +66,7 @@ fastify.get('/getData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       pendingConnections[localIP] = pendingConnections[localIP].filter(r => r !== resolve);
-    }, 6000);
+    }, 10000);
   });
 });
 const getCpuUsage = () => {
@@ -158,7 +158,7 @@ setInterval(() => {
       delete pendingData[ip];
     }
   });
-}, 17000);
+}, 15000);
 
 // Start Fastify server with clustering
 const start = async () => {
