@@ -1,11 +1,17 @@
 const fastify = require('fastify')({ logger: { level: "error" }, trustProxy: true });
 const cors = require('@fastify/cors');
+const path = require('path');
+const fastifyStatic = require('@fastify/static');
 
 const PORT = process.env.PORT || 3000;
 const DATA_TTL = 30000; // Data expiration time (30 seconds)
 
 let pendingData = {};  // { localIP: { data, timestamp } }
-let pendingConnections = {}; // { localIP: [res1, res2, ...] }
+let pendingConnections = {}; // { localIP: [resolve1, resolve2, ...] }
+
+// New globals for frontend long polling (no IP check)
+let pendingFrontendData = null;
+let frontendConnections = [];
 
 // Enable CORS
 fastify.register(cors, {
@@ -14,15 +20,21 @@ fastify.register(cors, {
   allowedHeaders: ["Content-Type"]
 });
 
-// ✅ Fix: Add a default route for health check
-fastify.get('/', async (req, reply) => {
+// Serve static files from the "public" folder
+fastify.register(fastifyStatic, {
+  root: path.join(__dirname, 'public'),
+  prefix: '/', // Files will be served at the root URL (e.g., http://localhost:3000/index.html)
+});
+
+// Health check route
+fastify.get('/health', async (req, reply) => {
   return { message: "Fastify server is running!" };
 });
 
-// C++ client long polling for data
+// C++ client long polling endpoint (with IP checking)
 fastify.get('/getData', async (req, reply) => {
   const localIP = req.query.localip;
-  console.log("Client polling for data with IP:", localIP);
+  console.log("C++ client polling for data with IP:", localIP);
 
   if (!localIP) {
     return reply.status(400).send({ status: "Error", message: "Missing localip" });
@@ -34,7 +46,7 @@ fastify.get('/getData', async (req, reply) => {
     return reply.send(data);
   }
 
-  // Keep connection open for 10 seconds (long polling)
+  // Keep the connection open for 10 seconds (long polling)
   return new Promise((resolve) => {
     pendingConnections[localIP] = pendingConnections[localIP] || [];
     pendingConnections[localIP].push(resolve);
@@ -46,7 +58,35 @@ fastify.get('/getData', async (req, reply) => {
   });
 });
 
-// Web menu sends data to server
+// Frontend long polling endpoint (no IP check)
+fastify.get('/getFrontendData', async (req, reply) => {
+  if (pendingFrontendData) {
+    const data = pendingFrontendData;
+    // Clear data after sending
+    pendingFrontendData = null;
+    return reply.send(data);
+  }
+  
+  // Keep connection open for 10 seconds
+  return new Promise((resolve) => {
+    frontendConnections.push(resolve);
+    setTimeout(() => {
+      resolve({ status: "no data" });
+      frontendConnections = frontendConnections.filter(r => r !== resolve);
+    }, 10000);
+  });
+});
+
+// New function to update frontend clients (no IP check)
+function updateFrontend(data) {
+  pendingFrontendData = data;
+  if (frontendConnections.length > 0) {
+    frontendConnections.forEach(resolve => resolve(data));
+    frontendConnections = [];
+  }
+}
+
+// Web menu sends data to server via POST /data
 fastify.post('/data', async (req, reply) => {
   try {
     const parsedData = req.body;
@@ -57,15 +97,18 @@ fastify.post('/data', async (req, reply) => {
       return reply.status(400).send({ status: "Error", message: "Missing localip" });
     }
 
-    // Store data with timestamp
+    // Store data for the C++ client with timestamp
     pendingData[localIP] = { data: parsedData, timestamp: Date.now() };
 
-    // Send data to waiting clients if any
+    // Notify waiting C++ clients if any
     if (pendingConnections[localIP] && pendingConnections[localIP].length > 0) {
       console.log(`Sending data to waiting C++ clients: ${localIP}`);
-      pendingConnections[localIP].forEach(response => response(parsedData));
+      pendingConnections[localIP].forEach(resolve => resolve(parsedData));
       pendingConnections[localIP] = [];
     }
+    
+    // Call the frontend update function to notify all frontend clients (no IP check)
+    updateFrontend(parsedData);
 
     return { status: "OK" };
   } catch (error) {
@@ -74,7 +117,7 @@ fastify.post('/data', async (req, reply) => {
   }
 });
 
-// Cleanup old data every 30 seconds
+// Cleanup stale data every 30 seconds
 setInterval(() => {
   const now = Date.now();
   Object.keys(pendingData).forEach(ip => {
