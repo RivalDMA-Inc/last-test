@@ -53,9 +53,11 @@ fastify.get('/getData', async (req, reply) => {
     return reply.status(400).send({ status: "Error", message: "Missing localip" });
   }
 
-  if (pendingData[localIP]) {
+  if (pendingData[localIP] && !pendingData[localIP].sent) {
     const data = pendingData[localIP].data;
-    delete pendingData[localIP]; // Remove data after sending
+    pendingData[localIP].sent = true; // Mark as sent
+    // Optionally, set a timeout to delete it after a grace period (e.g., 2 seconds)
+    setTimeout(() => { delete pendingData[localIP]; }, 2000);
     return reply.send(data);
   }
 
