@@ -1,15 +1,22 @@
-const fastify = require('fastify')({ logger: { level: "error" }, trustProxy: true });
+const fastify = require('fastify')({
+  logger: { level: "error" },
+  trustProxy: true,
+  bodyLimit: 2048576 // 2 MB in bytes
+});
+
 const cors = require('@fastify/cors');
 const path = require('path');
 const fastifyStatic = require('@fastify/static');
+const rateLimit = require('@fastify/rate-limit');
+const os = require('os');
 
 const PORT = process.env.PORT || 3000;
-const DATA_TTL = 30000; // Data expiration time (30 seconds)
+const DATA_TTL = 17000; // Data expiration time (30 seconds)
 
 let pendingData = {};  // { localIP: { data, timestamp } }
 let pendingConnections = {}; // { localIP: [resolve1, resolve2, ...] }
 
-// New globals for frontend long polling (no IP check)
+
 let pendingFrontendData = null;
 let frontendConnections = [];
 
@@ -30,7 +37,10 @@ fastify.register(fastifyStatic, {
 fastify.get('/health', async (req, reply) => {
   return { message: "Fastify server is running!" };
 });
-
+fastify.register(rateLimit, {
+  max: 10, // Maximum of 5 requests per minute
+  timeWindow: '1 minute'
+});
 // C++ client long polling endpoint (with IP checking)
 fastify.get('/getData', async (req, reply) => {
   const localIP = req.query.localip;
@@ -54,7 +64,7 @@ fastify.get('/getData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       pendingConnections[localIP] = pendingConnections[localIP].filter(r => r !== resolve);
-    }, 10000);
+    }, 8000);
   });
 });
 
@@ -144,7 +154,7 @@ setInterval(() => {
       delete pendingData[ip];
     }
   });
-}, 30000);
+}, 10000);
 
 // Start Fastify server
 const start = async () => {
