@@ -1,15 +1,21 @@
-const fastify = require('fastify')({ logger: { level: "error" }, trustProxy: true });
+const fastify = require('fastify')({
+  logger: { level: "error" },
+  trustProxy: true,
+  bodyLimit: 1048576 // 1 MB in bytes
+});
 const cors = require('@fastify/cors');
 const path = require('path');
 const fastifyStatic = require('@fastify/static');
+const rateLimit = require('@fastify/rate-limit');
+const cluster = require('cluster');
+const os = require('os');
 
 const PORT = process.env.PORT || 3000;
-const DATA_TTL = 30000; // Data expiration time (30 seconds)
+const DATA_TTL = 17000; // Data expiration time (30 seconds)
 
 let pendingData = {};  // { localIP: { data, timestamp } }
 let pendingConnections = {}; // { localIP: [resolve1, resolve2, ...] }
 
-// New globals for frontend long polling (no IP check)
 let pendingFrontendData = null;
 let frontendConnections = [];
 
@@ -18,6 +24,13 @@ fastify.register(cors, {
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type"]
+});
+
+// Register Rate Limiting
+fastify.register(rateLimit, {
+  max: 5, // Maximum of 5 requests
+  timeWindow: '1 minute', // Per 1 minute window
+  redis: null // Optional: use Redis to persist rate limits across instances
 });
 
 // Serve static files from the "public" folder
@@ -46,7 +59,6 @@ fastify.get('/getData', async (req, reply) => {
     return reply.send(data);
   }
 
-  // Keep the connection open for 10 seconds (long polling)
   return new Promise((resolve) => {
     pendingConnections[localIP] = pendingConnections[localIP] || [];
     pendingConnections[localIP].push(resolve);
@@ -54,7 +66,29 @@ fastify.get('/getData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       pendingConnections[localIP] = pendingConnections[localIP].filter(r => r !== resolve);
-    }, 10000);
+    }, 6000);
+  });
+});
+const getCpuUsage = () => {
+  const cpus = os.cpus();
+  let totalIdle = 0;
+  let totalTick = 0;
+
+  cpus.forEach(cpu => {
+    totalIdle += cpu.times.idle;
+    totalTick += Object.values(cpu.times).reduce((acc, time) => acc + time, 0);
+  });
+
+  const idlePercentage = (totalIdle / totalTick) * 100;
+  return (100 - idlePercentage).toFixed(2);  // CPU usage percentage
+};
+fastify.get('/systemStats', async (req, reply) => {
+  const cpuUsage = await getCpuUsage();
+  const memoryUsage = ((1 - os.freemem() / os.totalmem()) * 100).toFixed(2);
+  return reply.send({
+    cpuUsage: cpuUsage + "%",
+    memoryUsage: memoryUsage + "%",
+    workers: os.cpus().length
   });
 });
 
@@ -62,12 +96,10 @@ fastify.get('/getData', async (req, reply) => {
 fastify.get('/getFrontendData', async (req, reply) => {
   if (pendingFrontendData) {
     const data = pendingFrontendData;
-    // Clear data after sending
-    pendingFrontendData = null;
+    pendingFrontendData = null; // Clear after sending
     return reply.send(data);
   }
-  
-  // Keep connection open for 10 seconds
+
   return new Promise((resolve) => {
     frontendConnections.push(resolve);
     setTimeout(() => {
@@ -77,7 +109,7 @@ fastify.get('/getFrontendData', async (req, reply) => {
   });
 });
 
-// New function to update frontend clients (no IP check)
+// Update frontend data
 function updateFrontend(data) {
   pendingFrontendData = data;
   if (frontendConnections.length > 0) {
@@ -91,7 +123,6 @@ fastify.post('/data', async (req, reply) => {
   try {
     const parsedData = req.body;
     const localIP = parsedData.localip;
-    console.log("Received data from web menu for C++ client:", localIP);
 
     if (!localIP) {
       return reply.status(400).send({ status: "Error", message: "Missing localip" });
@@ -104,10 +135,11 @@ fastify.post('/data', async (req, reply) => {
     if (pendingConnections[localIP] && pendingConnections[localIP].length > 0) {
       console.log(`Sending data to waiting C++ clients: ${localIP}`);
       pendingConnections[localIP].forEach(resolve => resolve(parsedData));
+
       pendingConnections[localIP] = [];
     }
-    
-    // Call the frontend update function to notify all frontend clients (no IP check)
+
+    // Update frontend clients (no IP check)
     updateFrontend(parsedData);
 
     return { status: "OK" };
@@ -126,16 +158,31 @@ setInterval(() => {
       delete pendingData[ip];
     }
   });
-}, 30000);
+}, 17000);
 
-// Start Fastify server
+// Start Fastify server with clustering
 const start = async () => {
-  try {
-    await fastify.listen({ host: '0.0.0.0', port: PORT });
-    console.log(`Server listening on http://localhost:${PORT}`);
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
+  if (cluster.isMaster) {
+    // Fork workers for each CPU core
+    const numCores = os.cpus().length;
+    console.log(`Master process: Forking ${numCores} workers.`);
+    for (let i = 0; i < numCores; i++) {
+      cluster.fork();
+    }
+
+    cluster.on('exit', (worker, code, signal) => {
+      console.log(`Worker ${worker.process.pid} died`);
+    });
+  } else {
+    // Worker process will handle the requests
+    try {
+      await fastify.listen({ host: '0.0.0.0', port: PORT });
+      console.log(`Server listening on http://localhost:${PORT} (Worker: ${process.pid})`);
+    } catch (err) {
+      fastify.log.error(err);
+      process.exit(1);
+    }
   }
 };
+
 start();
