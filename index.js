@@ -59,7 +59,7 @@ fastify.get('/getData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       pendingConnections[localIP] = pendingConnections[localIP].filter(r => r !== resolve);
-    }, 10000);
+    }, 20000);
   });
 });
 
@@ -97,7 +97,7 @@ fastify.get('/getFrontendData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       frontendConnections = frontendConnections.filter(r => r !== resolve);
-    }, 500);
+    }, 5000);
   });
 });
 
@@ -149,7 +149,7 @@ setInterval(() => {
       delete pendingData[ip];
     }
   });
-}, 10000);
+}, 25000);
 
 // Start Fastify server
 const start = async () => {
