@@ -11,7 +11,7 @@ const rateLimit = require('@fastify/rate-limit');
 const os = require('os');
 
 const PORT = process.env.PORT || 3000;
-const DATA_TTL = 17000; // Data expiration time (30 seconds)
+const DATA_TTL = 30000; // Data expiration time (30 seconds)
 
 let pendingData = {};  // { localIP: { data, timestamp } }
 let pendingConnections = {}; // { localIP: [resolve1, resolve2, ...] }
@@ -59,7 +59,7 @@ fastify.get('/getData', async (req, reply) => {
     setTimeout(() => {
       resolve({ status: "no data" });
       pendingConnections[localIP] = pendingConnections[localIP].filter(r => r !== resolve);
-    }, 8000);
+    }, 10000);
   });
 });
 
