@@ -11,7 +11,7 @@ const os = require('os');
 const WebSocket = require('ws');
 
 const wss = new WebSocket.Server({ noServer: true });
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 443;
 const DATA_TTL = 17000; // Data expiration time
 
 // Mapping to store WebSocket clients keyed by localIP
