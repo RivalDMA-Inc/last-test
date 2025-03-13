@@ -3,22 +3,22 @@ const fastify = require('fastify')({
   trustProxy: true,
   bodyLimit: 2048576 // 2 MB in bytes
 });
-
 const cors = require('@fastify/cors');
 const path = require('path');
 const fastifyStatic = require('@fastify/static');
 const rateLimit = require('@fastify/rate-limit');
 const os = require('os');
+const WebSocket = require('ws');
 
+const wss = new WebSocket.Server({ noServer: true });
 const PORT = process.env.PORT || 3000;
-const DATA_TTL = 17000; // Data expiration time (30 seconds)
+const DATA_TTL = 17000; // Data expiration time
 
-let pendingData = {};  // { localIP: { data, timestamp } }
-let pendingConnections = {}; // { localIP: [resolve1, resolve2, ...] }
+// Mapping to store WebSocket clients keyed by localIP
+const wsClients = {};
 
-
-let pendingFrontendData = null;
-let frontendConnections = [];
+// For storing pending data if a client is not connected
+let pendingData = {};
 
 // Enable CORS
 fastify.register(cors, {
@@ -30,7 +30,7 @@ fastify.register(cors, {
 // Serve static files from the "public" folder
 fastify.register(fastifyStatic, {
   root: path.join(__dirname, 'public'),
-  prefix: '/', // Files will be served at the root URL (e.g., http://localhost:3000/index.html)
+  prefix: '/'
 });
 
 // Health check route
@@ -38,105 +38,83 @@ fastify.get('/health', async (req, reply) => {
   return { message: "Fastify server is running!" };
 });
 fastify.register(rateLimit, {
-  max: 10, // Maximum of 5 requests per minute
+  max: 10,
   timeWindow: '1 minute'
 });
-// C++ client long polling endpoint (with IP checking)
-fastify.get('/getData', async (req, reply) => {
-  const localIP = req.query.localip;
-  console.log("C++ client polling for data with IP:", localIP);
 
-  if (!localIP) {
-    return reply.status(400).send({ status: "Error", message: "Missing localip" });
+// Remove or deprecate the long polling endpoint, since it’s replaced by WebSocket
+// fastify.get('/getData', ...);
+
+// Handle HTTP upgrade requests for WebSocket connections
+fastify.server.on('upgrade', (request, socket, head) => {
+  // Handle only if the URL is '/ws'
+  if (request.url === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    socket.destroy();
   }
+});
 
-  if (pendingData[localIP]) {
-    const data = pendingData[localIP].data;
-    delete pendingData[localIP]; // Remove data after sending
-    return reply.send(data);
-  }
+// WebSocket connection handling
+wss.on('connection', (ws, request) => {
+  console.log('WebSocket client connected');
 
-  // Keep the connection open for 10 seconds (long polling)
-  return new Promise((resolve) => {
-    pendingConnections[localIP] = pendingConnections[localIP] || [];
-    pendingConnections[localIP].push(resolve);
+  // Expect the client to send an initial JSON message with its localIP
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.localIP) {
+        ws.localIP = data.localIP;
+        wsClients[data.localIP] = ws;
+        console.log(`Registered WebSocket client for localIP: ${data.localIP}`);
 
-    setTimeout(() => {
-      resolve({ status: "no data" });
-      pendingConnections[localIP] = pendingConnections[localIP].filter(r => r !== resolve);
-    }, 8000);
+        // Optionally, if there is pending data for this localIP, send it now:
+        if (pendingData[data.localIP]) {
+          ws.send(JSON.stringify(pendingData[data.localIP]));
+          delete pendingData[data.localIP];
+        }
+      } else {
+        console.log('Received message:', message);
+      }
+    } catch (err) {
+      console.error('Error parsing message:', err);
+    }
+  });
+
+  ws.on('close', () => {
+    if (ws.localIP) {
+      delete wsClients[ws.localIP];
+      console.log(`WebSocket client for localIP ${ws.localIP} disconnected`);
+    }
   });
 });
 
-const getCpuUsage = () => {
-  const cpus = os.cpus();
-  let totalIdle = 0;
-  let totalTick = 0;
-  cpus.forEach(cpu => {
-    totalIdle += cpu.times.idle;
-    totalTick += Object.values(cpu.times).reduce((acc, time) => acc + time, 0);
-  });
-  const idlePercentage = (totalIdle / totalTick) * 100;
-  return (100 - idlePercentage).toFixed(2);  // CPU usage percentage
-};
-
-fastify.get('/systemStats', async (req, reply) => {
-  const cpuUsage = await getCpuUsage();
-  const memoryUsage = ((1 - os.freemem() / os.totalmem()) * 100).toFixed(2);
-  return reply.send({
-    cpuUsage: cpuUsage + "%",
-    memoryUsage: memoryUsage + "%",
-    workers: os.cpus().length
-  });
-});
-
-// Frontend long polling endpoint (for updating the frontend display)
-fastify.get('/getFrontendData', async (req, reply) => {
-  if (pendingFrontendData) {
-    const data = pendingFrontendData;
-    pendingFrontendData = null; // Clear after sending
-    return reply.send(data);
-  }
-  return new Promise((resolve) => {
-    frontendConnections.push(resolve);
-    setTimeout(() => {
-      resolve({ status: "no data" });
-      frontendConnections = frontendConnections.filter(r => r !== resolve);
-    }, 500);
-  });
-});
-
-// Update frontend data (in-process)
-function updateFrontend(data) {
-  pendingFrontendData = data;
-  if (frontendConnections.length > 0) {
-    frontendConnections.forEach(resolve => resolve(data));
-    frontendConnections = [];
-  }
-}
 // Web menu sends data to server via POST /data
 fastify.post('/data', async (req, reply) => {
   try {
     const parsedData = req.body;
     const localIP = parsedData.localip;
-    console.log("Received data from web menu for C++ client:", localIP);
+    console.log(`[${new Date().toLocaleString()}] Received data from web menu for localIP:`, localIP);
 
     if (!localIP) {
       return reply.status(400).send({ status: "Error", message: "Missing localip" });
     }
 
-    // Store data for the C++ client with timestamp
-    pendingData[localIP] = { data: parsedData, timestamp: Date.now() };
-
-    // Notify waiting C++ clients if any
-    if (pendingConnections[localIP] && pendingConnections[localIP].length > 0) {
-      console.log(`Sending data to waiting C++ clients: ${localIP}`);
-      pendingConnections[localIP].forEach(resolve => resolve(parsedData));
-      pendingConnections[localIP] = [];
+    // Check if there's an active WebSocket connection for this localIP
+    const ws = wsClients[localIP];
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(parsedData));
+      console.log(`Data sent to client with localIP ${localIP}`);
+    } else {
+      // Optionally, store the data as pending if the client is not connected
+      pendingData[localIP] = { data: parsedData, timestamp: Date.now() };
+      console.log(`No active client for ${localIP}. Data stored as pending.`);
     }
-    
-    // Call the frontend update function to notify all frontend clients (no IP check)
-    updateFrontend(parsedData);
+
+    // You may still update the frontend if needed
+    // updateFrontend(parsedData); // if using a similar mechanism for frontend updates
 
     return { status: "OK" };
   } catch (error) {
@@ -145,16 +123,33 @@ fastify.post('/data', async (req, reply) => {
   }
 });
 
-// Cleanup stale data every 30 seconds
+// Optional: Clean up stale pending data every 10 seconds
 setInterval(() => {
   const now = Date.now();
   Object.keys(pendingData).forEach(ip => {
     if (now - pendingData[ip].timestamp > DATA_TTL) {
-      console.log(`Removing stale data for ${ip}`);
+      console.log(`Removing stale pending data for ${ip}`);
       delete pendingData[ip];
     }
   });
 }, 10000);
+
+// Example endpoint for system stats
+fastify.get('/systemStats', async (req, reply) => {
+  const cpus = os.cpus();
+  let totalIdle = 0, totalTick = 0;
+  cpus.forEach(cpu => {
+    totalIdle += cpu.times.idle;
+    totalTick += Object.values(cpu.times).reduce((acc, time) => acc + time, 0);
+  });
+  const cpuUsage = (100 - (totalIdle / totalTick) * 100).toFixed(2);
+  const memoryUsage = ((1 - os.freemem() / os.totalmem()) * 100).toFixed(2);
+  return reply.send({
+    cpuUsage: cpuUsage + "%",
+    memoryUsage: memoryUsage + "%",
+    workers: cpus.length
+  });
+});
 
 // Start Fastify server
 const start = async () => {
