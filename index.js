@@ -50,12 +50,7 @@ fastify.get('/getData', async (req, reply) => {
     return reply.status(400).send({ status: "Error", message: "Missing localip" });
   }
 
-  if (pendingData[localIP]) {
-    const data = pendingData[localIP].data;
-    delete pendingData[localIP]; // Remove data after sending
-    return reply.send(data);
-  }
-
+  
   // Keep the connection open for 10 seconds (long polling)
   return new Promise((resolve) => {
     pendingConnections[localIP] = pendingConnections[localIP] || [];
