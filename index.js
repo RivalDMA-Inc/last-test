@@ -133,14 +133,16 @@ fastify.post('/data', async (req, reply) => {
     // Store data for the C++ client with timestamp
     pendingData[localIP] = { data: parsedData, timestamp: Date.now() };
 
-    // Notify waiting C++ clients if any
+    // Notify waiting C++ clients if any and clear the pending data so it isn't sent twice
     if (pendingConnections[localIP] && pendingConnections[localIP].length > 0) {
       console.log(`Sending data to waiting C++ clients: ${localIP}`);
       pendingConnections[localIP].forEach(resolve => resolve(parsedData));
       pendingConnections[localIP] = [];
+      // Clear the pending data since it has already been delivered
+      delete pendingData[localIP];
     }
     
-    // Call the frontend update function to notify all frontend clients (no IP check)
+    // Update frontend clients
     updateFrontend(parsedData);
 
     return { status: "OK" };
