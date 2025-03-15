@@ -1,14 +1,22 @@
+
+
 const fastify = require('fastify')({
   logger: { level: "error" },
   trustProxy: true,
   bodyLimit: 2048576 // 2 MB in bytes
 });
 
+
 const cors = require('@fastify/cors');
 const path = require('path');
 const fastifyStatic = require('@fastify/static');
 const rateLimit = require('@fastify/rate-limit');
 const os = require('os');
+
+fastify.register(rateLimit, {
+  max: 20, // Maximum of 5 requests per minute
+  timeWindow: '1 minute'
+});
 
 const PORT = process.env.PORT || 3000;
 const DATA_TTL = 30000; // Data expiration time (30 seconds)
@@ -37,10 +45,7 @@ fastify.register(fastifyStatic, {
 fastify.get('/health', async (req, reply) => {
   return { message: "Fastify server is running!" };
 });
-fastify.register(rateLimit, {
-  max: 10, // Maximum of 5 requests per minute
-  timeWindow: '1 minute'
-});
+
 // C++ client long polling endpoint (with IP checking)
 fastify.get('/getData', async (req, reply) => {
   const localIP = req.query.localip;
@@ -50,7 +55,12 @@ fastify.get('/getData', async (req, reply) => {
     return reply.status(400).send({ status: "Error", message: "Missing localip" });
   }
 
-  
+  if (pendingData[localIP]) {
+    const data = pendingData[localIP].data;
+    delete pendingData[localIP]; // Remove data after sending
+    return reply.send(data);
+  }
+
   // Keep the connection open for 10 seconds (long polling)
   return new Promise((resolve) => {
     pendingConnections[localIP] = pendingConnections[localIP] || [];
